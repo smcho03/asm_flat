@@ -1,4 +1,4 @@
 __pycache__/
-vscode/
+.vscode/
 output/
 sanity_results/

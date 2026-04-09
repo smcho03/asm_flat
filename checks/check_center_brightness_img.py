@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from sensor_model import HolographicSensor
 from sensor_params import wavelength, mem_res, mem_pitch, cmos_res, grid_res, distance
 from sensor_utils import STYLE

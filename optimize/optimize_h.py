@@ -19,7 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from sensor_model  import HolographicSensor, gaussian_bump
 from sensor_params import wavelength, mem_res, mem_pitch, cmos_res, grid_res, distance
 from sensor_utils  import STYLE
@@ -58,26 +58,46 @@ print(f"I_target  min/max: {I_target.min():.4f} / {I_target.max():.4f}")
 h_pred = torch.zeros(mem_res, mem_res, dtype=torch.float32,
                      device=device, requires_grad=True)
 
-optimizer = torch.optim.Adam([h_pred], lr=2e-9)
+optimizer = torch.optim.Adam([h_pred], lr=5e-10)
 
-N_iter    = 2000
-log_every = 200
-losses    = []
+N_iter    = 3000
+log_every = 300
+lambda_tv  = 1e-20   # TV (1차 미분)
+lambda_lap = 1e-40   # Laplacian (2차 미분)
+losses        = []
+losses_mse    = []
+losses_tv     = []
+losses_lap    = []
 
-print(f"\nOptimizing for {N_iter} iterations ...")
+print(f"\nOptimizing for {N_iter} iterations ...  "
+      f"(lambda_tv={lambda_tv:.0e}, lambda_lap={lambda_lap:.0e})")
 for i in range(N_iter):
     optimizer.zero_grad()
 
     I_pred = sensor(h_pred)
-    loss   = torch.mean((I_pred - I_target) ** 2)
+    mse    = torch.mean((I_pred - I_target) ** 2)
+
+    tv  = (torch.mean(torch.abs(h_pred[1:, :] - h_pred[:-1, :])) +
+           torch.mean(torch.abs(h_pred[:, 1:] - h_pred[:, :-1])))
+
+    lap = (h_pred[2:, 1:-1] + h_pred[:-2, 1:-1] +
+           h_pred[1:-1, 2:] + h_pred[1:-1, :-2] -
+           4.0 * h_pred[1:-1, 1:-1])
+    reg_lap = torch.mean(lap ** 2)
+
+    loss = mse + lambda_tv * tv + lambda_lap * reg_lap
 
     loss.backward()
     optimizer.step()
 
     losses.append(float(loss.item()))
+    losses_mse.append(float(mse.item()))
+    losses_tv.append(float(tv.item()))
+    losses_lap.append(float(reg_lap.item()))
 
     if (i + 1) % log_every == 0:
         print(f"  iter {i+1:4d}  loss={loss.item():.4e}  "
+              f"mse={mse.item():.4e}  tv={tv.item():.4e}  lap={reg_lap.item():.4e}  "
               f"h_pred max={h_pred.abs().max().item()*1e9:.2f} nm", flush=True)
 
 print("Done.")
@@ -110,7 +130,7 @@ plt.rcParams.update(STYLE)
 fig, axes = plt.subplots(2, 4, figsize=(22, 10))
 fig.suptitle(
     f"Inverse problem: recover h from CMOS intensity\n"
-    f"Adam lr=2e-9,  {N_iter} iters,  h_true amp=200nm sigma=150um",
+    f"Adam lr=5e-10,  {N_iter} iters,  tv={lambda_tv:.0e}  lap={lambda_lap:.0e},  h_true amp=200nm sigma=150um",
     fontsize=11, color="#e6edf3",
 )
 fig.patch.set_facecolor("#0d1117")
@@ -140,9 +160,13 @@ _im(axes[0,2], diff_h_nm, ext_m, "RdBu",   -dh_abs, dh_abs, "dh [nm]",  "h_pred 
 # loss curve
 ax_l = axes[0,3]
 ax_l.set_facecolor("#0d1117")
-ax_l.plot(losses, color="#58a6ff", lw=1.2)
+ax_l.plot(losses,     color="#58a6ff", lw=1.2, label="total")
+ax_l.plot(losses_mse, color="#f78166", lw=1.0, linestyle="--", label="MSE")
+ax_l.plot(losses_tv,  color="#3fb950", lw=1.0, linestyle=":",  label="TV")
+ax_l.plot(losses_lap, color="#e3b341", lw=1.0, linestyle="-.", label="Laplacian")
+ax_l.legend(fontsize=7, labelcolor="#e6edf3", framealpha=0.3)
 ax_l.set_xlabel("iteration", color="#8b949e", fontsize=8)
-ax_l.set_ylabel("MSE loss", color="#8b949e", fontsize=8)
+ax_l.set_ylabel("loss", color="#8b949e", fontsize=8)
 ax_l.set_title("Loss curve", fontsize=9, color="#e6edf3")
 ax_l.set_yscale("log")
 ax_l.tick_params(colors="#8b949e", labelsize=7)
