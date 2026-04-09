@@ -15,7 +15,8 @@ from datetime import datetime
 import torch
 
 sys.stdout.reconfigure(line_buffering=True)
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent))          # sanity/ (for sibling imports)
+sys.path.insert(0, str(Path(__file__).parent.parent))  # root   (for sensor_model etc.)
 
 timestamp = datetime.now().strftime("%m%d_%H%M%S")
 out_dir   = Path(__file__).parent / 'sanity_results' / timestamp

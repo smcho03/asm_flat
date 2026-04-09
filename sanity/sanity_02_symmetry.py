@@ -10,7 +10,7 @@ Output: 1x3 for gradient test case
 import sys
 import numpy as np
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 from sensor_model  import HolographicSensor, gaussian_bump
@@ -79,15 +79,20 @@ def run(out_dir: Path, device: str = "cpu") -> None:
     h_ctr   = gaussian_bump(N=N, dx=dx, amplitude=500e-9, sigma=100e-6, device=device)
     h_sft   = gaussian_bump(N=N, dx=dx, amplitude=500e-9, sigma=100e-6,
                             center=(0.0, shift_m), device=device)
+    h_flat = torch.zeros(N, N, device=device)
     with torch.no_grad():
-        I_ctr = sensor(h_ctr).cpu().numpy()
-        I_sft = sensor(h_sft).cpu().numpy()
+        I_flat = sensor(h_flat).cpu().numpy()
+        I_ctr  = sensor(h_ctr).cpu().numpy()
+        I_sft  = sensor(h_sft).cpu().numpy()
 
-    peak_ctr = int(I_ctr.argmax() % M)    # column index of peak
-    peak_sft = int(I_sft.argmax() % M)
+    # Convex mirror: bump creates a dip -> argmin of delta_I tracks bump location
+    dI_ctr   = I_ctr - I_flat
+    dI_sft   = I_sft - I_flat
+    peak_ctr = int(dI_ctr.argmin() % M)
+    peak_sft = int(dI_sft.argmin() % M)
     delta_px  = peak_sft - peak_ctr
     delta_um  = delta_px * dx * 1e6
-    ok4 = abs(delta_um - shift_m * 1e6) < 5 * dx * 1e6   # within 5 px
+    ok4 = abs(delta_um - shift_m * 1e6) < 5 * dx * 1e6
     print(f"  [{'PASS' if ok4 else 'FAIL'}]  Off-centre shift          "
           f"expected={shift_m*1e6:.0f}um  measured={delta_um:.1f}um", flush=True)
 

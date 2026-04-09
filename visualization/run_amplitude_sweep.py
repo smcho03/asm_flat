@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from skimage.restoration import unwrap_phase
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from sensor_model  import HolographicSensor, gaussian_bump
 from sensor_params import wavelength, mem_res, mem_pitch, cmos_res, grid_res, distance
 from sensor_utils  import STYLE
