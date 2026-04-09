@@ -286,3 +286,33 @@ def make_h_random(
     nc     = torch.view_as_complex(torch.stack([noise, torch.zeros_like(noise)], -1))
     fil    = torch.fft.ifft2(torch.fft.fft2(nc) * lpf).real
     return (fil / fil.abs().max().clamp(min=1e-30)) * amplitude
+
+
+def make_h_random_pressed(
+    N: int, dx: float, device: str,
+    seed: int = 42, amplitude: float = 50e-9, sigma_filter: float = 150e-6,
+) -> torch.Tensor:
+    """Physically realistic pressed membrane surface.
+
+    Properties:
+      - Unidirectional: h >= 0 (pressed inward toward light source)
+      - Clamped boundary: h = 0 at all edges
+      - Band-limited: smooth spatial structure via Gaussian LPF
+    """
+    torch.manual_seed(seed)
+    noise  = torch.randn(N, N, dtype=torch.float32, device=device)
+    f      = torch.fft.fftfreq(N, d=dx)
+    Fx, Fy = torch.meshgrid(f, f, indexing="ij")
+    lpf    = torch.exp(-2.0 * (np.pi * sigma_filter)**2 * (Fx**2 + Fy**2))
+    nc     = torch.view_as_complex(torch.stack([noise, torch.zeros_like(noise)], -1))
+    fil    = torch.fft.ifft2(torch.fft.fft2(nc) * lpf).real
+
+    # Unidirectional: take absolute value
+    fil = fil.abs()
+
+    # Clamped boundary: Hann window (sin^2) tapers smoothly to 0 at edges
+    t      = torch.linspace(0.0, np.pi, N, device=device)
+    window = torch.outer(torch.sin(t), torch.sin(t))  # 0 at boundaries, 1 at center
+    fil    = fil * window
+
+    return (fil / fil.max().clamp(min=1e-30)) * amplitude
