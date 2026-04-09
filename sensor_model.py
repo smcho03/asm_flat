@@ -120,7 +120,7 @@ class HolographicSensor(nn.Module):
         L        = N * dx
         sin_max  = (L / 2.0) / np.sqrt(d**2 + (L / 2.0)**2)
         f_max    = sin_max / lam
-        alias_mask = (torch.abs(Fx) <= f_max) & (torch.abs(Fy) <= f_max)
+        alias_mask = (F2 <= f_max**2)
 
         mask     = prop_mask & alias_mask
         sqrt_arg = torch.clamp(1.0 / lam**2 - F2, min=0.0)
@@ -155,7 +155,7 @@ class HolographicSensor(nn.Module):
         h_grid = F.pad(h, pad)
         A_grid = F.pad(A, pad)
 
-        phi   = (4.0 * np.pi / self.lam) * h_grid
+        phi   = -(4.0 * np.pi / self.lam) * h_grid
         U0    = A_grid * torch.exp(1j * phi)
         Ud    = torch.fft.ifft2(torch.fft.fft2(U0) * self.H)
 
@@ -179,7 +179,7 @@ class HolographicSensor(nn.Module):
                   self._ms, self.grid_res - self._me)
         h_grid = F.pad(h, pad)
         A_grid = F.pad(A, pad)
-        phi    = (4.0 * np.pi / self.lam) * h_grid
+        phi    = -(4.0 * np.pi / self.lam) * h_grid
         U0     = A_grid * torch.exp(1j * phi)
         return torch.fft.ifft2(torch.fft.fft2(U0) * self.H)
 
@@ -257,12 +257,15 @@ def make_h_single_bump(N: int, dx: float, device: str) -> torch.Tensor:
 
 
 def make_h_multi_bump(N: int, dx: float, device: str) -> torch.Tensor:
+    # Centers must be within ±(N/2)*dx of membrane centre.
+    # For N=512, dx=10um: limit = ±2560um (all safe).
+    # For N=128, dx=10um: limit = ±640um  (use reconstruct_sweep.make_h instead).
     specs = [
         dict(amplitude=500e-9, sigma= 80e-6, center=(     0.0,      0.0)),
-        dict(amplitude=400e-9, sigma=120e-6, center=( 800e-6,   300e-6)),
-        dict(amplitude=300e-9, sigma= 60e-6, center=(-600e-6,  -700e-6)),
-        dict(amplitude=450e-9, sigma= 90e-6, center=( 200e-6,  -900e-6)),
-        dict(amplitude=350e-9, sigma=150e-6, center=(-900e-6,   600e-6)),
+        dict(amplitude=400e-9, sigma=120e-6, center=( 300e-6,   200e-6)),
+        dict(amplitude=300e-9, sigma= 60e-6, center=(-250e-6,  -300e-6)),
+        dict(amplitude=450e-9, sigma= 90e-6, center=( 200e-6,  -400e-6)),
+        dict(amplitude=350e-9, sigma=150e-6, center=(-400e-6,   300e-6)),
     ]
     h = torch.zeros(N, N, dtype=torch.float32, device=device)
     for s in specs:
