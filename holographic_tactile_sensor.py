@@ -136,7 +136,7 @@ class HolographicSensor(nn.Module):
         L       = N * dx
         sin_max = (L / 2.0) / np.sqrt(d**2 + (L / 2.0)**2)
         f_max   = sin_max / lam                      # [cycles/m]
-        alias_mask = (torch.abs(Fx) <= f_max) & (torch.abs(Fy) <= f_max)
+        alias_mask = (F2 <= f_max**2)
 
         mask = prop_mask & alias_mask                # combined boolean mask
 
@@ -185,7 +185,8 @@ class HolographicSensor(nn.Module):
         A_grid = F.pad(A, pad)                      # [grid_res, grid_res]
 
         # Step 1 - Phase modulation (reflection: double-pass -> factor 4pi/lam)
-        phi = (4.0 * np.pi / self.lam) * h_grid    # [grid_res, grid_res] real
+        # h > 0: surface closer to laser -> round-trip path shorter by 2h -> negative sign
+        phi = -(4.0 * np.pi / self.lam) * h_grid   # [grid_res, grid_res] real
         U0  = A_grid * torch.exp(1j * phi)          # [grid_res, grid_res] complex
 
         # Step 2 - Angular Spectrum propagation
@@ -217,7 +218,7 @@ class HolographicSensor(nn.Module):
                self._ms, self.grid_res - self._me)
         h_grid = F.pad(h, pad)
         A_grid = F.pad(A, pad)
-        phi = (4.0 * np.pi / self.lam) * h_grid
+        phi = -(4.0 * np.pi / self.lam) * h_grid
         U0  = A_grid * torch.exp(1j * phi)
         return self._asm_propagate(U0)
 
