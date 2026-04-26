@@ -110,19 +110,25 @@ with torch.no_grad():
 # -----------------------------------------------------------------------
 # Reconstruction (uses matching forward model)
 # -----------------------------------------------------------------------
-def reconstruct(forward_fn, I_tgt, lr=1e-3, n_iter=1500):
-    h_var = torch.zeros(MEM, MEM, dtype=torch.float32, device=device,
-                        requires_grad=True)
-    opt = torch.optim.Adam([h_var], lr=lr)
+def reconstruct(forward_fn, I_tgt, lr=3e-3, n_iter=3000):
+    # Squared reparam (h >= 0) + Adam + cosine decay — fixed algorithm.
+    # raw=0.2 for centred Gaussian bump (mean << peak).
+    raw = torch.full((MEM, MEM), 0.2, dtype=torch.float32, device=device,
+                     requires_grad=True)
+    opt = torch.optim.Adam([raw], lr=lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_iter)
     losses = []
     for _ in range(n_iter):
         opt.zero_grad()
-        I = forward_fn(h_var * H_SCALE)
+        h = (raw * raw) * H_SCALE
+        I = forward_fn(h)
         loss = torch.mean((I - I_tgt)**2)
         loss.backward()
-        opt.step()
+        opt.step(); sched.step()
         losses.append(float(loss.detach()))
-    return (h_var.detach() * H_SCALE), losses
+    with torch.no_grad():
+        h_final = (raw * raw) * H_SCALE
+    return h_final, losses
 
 def psnr_db(a, b):
     mse_v = float(torch.mean((a - b)**2))
@@ -143,8 +149,9 @@ p_diff = psnr_db(h_diff, h_true); dt_d = time.time()-t0
 
 print("Reconstructing (diffuser avg, N=20) ...")
 t0 = time.time()
+# Same n_iter as the others — previously 800, which unfairly biased against diff-avg.
 h_davg, L_davg = reconstruct(lambda h: forward_diffuser_avg(h, n_real=20),
-                              I_diffavg, n_iter=800)
+                              I_diffavg)
 p_davg = psnr_db(h_davg, h_true); dt_a = time.time()-t0
 
 print(f"\n  specular       PSNR={p_spec:.2f} dB  ({dt_s:.1f}s)")

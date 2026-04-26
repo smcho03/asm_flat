@@ -68,7 +68,7 @@ AMP   = 200e-9
 SIGMA = 100e-6
 H_SCALE = 400e-9
 LR    = 3e-3
-N_ITER = 5000
+N_ITER = 1500
 
 dx = mem_pitch
 
@@ -177,9 +177,13 @@ for k, (label, lams, angs) in sources.items():
     print(f"  {k:18s} {len(lams)*len(angs):3d} realizations  in {time.time()-t0:.1f}s")
 
 # Photometric Gelsight target — separate, returns 3 channels
+# Includes physical Gelsight limits: elastomer blur + camera pixel pitch.
+# (Matches gelsight_photometric_compare.py: CAM_PIXEL=30um, BLUR_SIGMA=60um.)
+CAM_PIXEL_UM = 30.0
+BLUR_SIGMA_UM = 60.0
+
 def photometric_target(h):
-    coords = (np.arange(MEM) - (MEM-1)*0.5) * dx
-    X, Y = np.meshgrid(coords, coords, indexing="ij")
+    from scipy.ndimage import gaussian_filter
     h_np = h.detach().cpu().numpy()
     gy_h, gx_h = np.gradient(h_np, dx)
     nz_d = np.sqrt(gx_h**2 + gy_h**2 + 1.0)
@@ -190,10 +194,19 @@ def photometric_target(h):
         [-np.sin(th)/2,  np.sin(th)*np.sqrt(3)/2, np.cos(th)],
         [-np.sin(th)/2, -np.sin(th)*np.sqrt(3)/2, np.cos(th)],
     ])
-    return [np.clip(nx*l[0]+ny*l[1]+nz*l[2], 0, None) for l in leds], leds
+    # Render Lambertian intensities
+    Is = [np.clip(nx*l[0]+ny*l[1]+nz*l[2], 0, None) for l in leds]
+    # Elastomer + optical blur
+    blur_px = BLUR_SIGMA_UM * 1e-6 / dx
+    Is = [gaussian_filter(I, sigma=blur_px) for I in Is]
+    # Downsample to camera pixel pitch (block-average)
+    ds = max(int(round(CAM_PIXEL_UM / (dx*1e6))), 1)
+    H2 = (MEM // ds) * ds
+    Is = [I[:H2, :H2].reshape(H2//ds, ds, H2//ds, ds).mean(axis=(1,3)) for I in Is]
+    return Is, leds
 
 I_photo, photo_leds = photometric_target(h_true)
-sources["photo_3led"] = ("3-LED Lambertian (no fringe)", None, None)
+sources["photo_3led"] = ("3-LED Lambertian (cam 30um + blur 60um)", None, None)
 
 # ----------------------------------------------------------------------
 # Reconstruction
@@ -217,10 +230,13 @@ def reconstruct_partial(forward_fn, I_tgt, n_iter=N_ITER, lr=LR):
     return h_final, losses
 
 def reconstruct_photometric(I_targets_np, leds, n_iter=2000, lr=1e-2):
-    """Use the standard Gelsight approach: photometric stereo on the *given*
-    intensities (no blur, no downsample, perfect resolution) then
-    Frankot-Chellappa integration."""
-    I_stack = np.stack(I_targets_np, axis=-1)  # H, W, 3
+    """Gelsight-style photometric stereo: 3-LED Lambertian → normals →
+    Frankot-Chellappa integration → h_rec. The intensities are assumed to
+    have already been through the camera-pipeline limits (blur+downsample),
+    so the native grid here is the camera grid (smaller than MEM).
+    We upsample back to MEM×MEM for fair PSNR comparison against h_true."""
+    from scipy.ndimage import zoom
+    I_stack = np.stack(I_targets_np, axis=-1)  # H_cam, W_cam, 3
     L_pinv = np.linalg.pinv(leds)
     n_est = I_stack @ L_pinv.T
     nrm   = np.linalg.norm(n_est, axis=-1, keepdims=True).clip(min=1e-12)
@@ -228,14 +244,24 @@ def reconstruct_photometric(I_targets_np, leds, n_iter=2000, lr=1e-2):
     nx = n_est[..., 0]; ny = n_est[..., 1]; nz = n_est[..., 2].clip(min=1e-3)
     gx = -nx/nz; gy = -ny/nz
     H, W = gx.shape
+    # gradients are per camera-pixel; convert to per-metre using cam pitch
+    cam_dx = CAM_PIXEL_UM * 1e-6
     fx = np.fft.fftfreq(W).reshape(1, W)
     fy = np.fft.fftfreq(H).reshape(H, 1)
     denom = (fx**2 + fy**2); denom[0,0] = 1.0
     Gx = np.fft.fft2(gx); Gy = np.fft.fft2(gy)
     F_ = -1j*(fx*Gx + fy*Gy) / (2*np.pi*denom + 1e-30)
     F_[0, 0] = 0
-    z = np.real(np.fft.ifft2(F_)) * dx
-    return z - np.median(z)
+    z_cam = np.real(np.fft.ifft2(F_)) * cam_dx
+    z_cam = z_cam - np.median(z_cam)
+    # Upsample (bilinear) back to MEM×MEM so we can compare with h_true
+    z_up = zoom(z_cam, (MEM / H, MEM / W), order=1)
+    z_up = z_up[:MEM, :MEM]
+    if z_up.shape != (MEM, MEM):
+        out = np.zeros((MEM, MEM), dtype=z_up.dtype)
+        out[:z_up.shape[0], :z_up.shape[1]] = z_up
+        z_up = out
+    return z_up
 
 def psnr_db(a, b):
     mse = float(torch.mean((a - b)**2))

@@ -54,12 +54,14 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"device: {device}")
 
 # Smaller config for the 2D sweep (~30 cells)
+# Uses the fixed algorithm: h = raw^2 * H_SCALE (positivity) + Adam-3k + cosine decay.
+# Matches reconstruction_squared_polish / random_pattern_reconstruction defaults.
 MEM   = 128
 CMOS  = 256
 GRID  = 384
 DIST  = 5e-3
 LR    = 3e-3
-N_ITER = 1000
+N_ITER = 1500
 
 lam = wavelength
 dx  = mem_pitch
@@ -79,17 +81,24 @@ def make_bump(A_m, sig_m):
     return A_m * torch.exp(-(X**2 + Y**2) / (2 * sig_m**2))
 
 def reconstruct(h_true, h_scale):
+    # Squared reparam (h >= 0) + Adam + cosine decay — fixed algorithm.
+    # raw=0.2 is appropriate for a centred Gaussian bump (mean << peak).
     with torch.no_grad():
         I_tgt = sensor(h_true)
-    h_var = torch.zeros(MEM, MEM, dtype=torch.float32, device=device,
-                        requires_grad=True)
-    opt = torch.optim.Adam([h_var], lr=LR)
+    raw = torch.full((MEM, MEM), 0.2, dtype=torch.float32, device=device,
+                     requires_grad=True)
+    opt = torch.optim.Adam([raw], lr=LR)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=N_ITER)
     for _ in range(N_ITER):
         opt.zero_grad()
-        loss = torch.mean((sensor(h_var * h_scale) - I_tgt)**2)
+        h = (raw * raw) * h_scale
+        loss = torch.mean((sensor(h) - I_tgt)**2)
         loss.backward()
         opt.step()
-    return (h_var.detach() * h_scale)
+        sched.step()
+    with torch.no_grad():
+        h_final = (raw * raw) * h_scale
+    return h_final
 
 def psnr_db(a, b):
     mse = float(torch.mean((a - b)**2))
@@ -140,7 +149,7 @@ def _style(ax):
 # (A) PSNR heatmap
 ax = axes[0]
 im = ax.imshow(PSNR, origin="lower", aspect="auto", cmap="viridis",
-               vmin=5, vmax=25,
+               vmin=0, vmax=55,
                extent=[np.log10(sigma_um[0]), np.log10(sigma_um[-1]),
                        np.log10(A_nm[0]),    np.log10(A_nm[-1])])
 cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -163,7 +172,7 @@ for i, A in enumerate(A_nm):
     for j, sg in enumerate(sigma_um):
         ax.text(np.log10(sg), np.log10(A), f"{PSNR[i,j]:.0f}",
                 ha="center", va="center", fontsize=7,
-                color=("white" if PSNR[i,j] < 17 else "black"))
+                color=("white" if PSNR[i,j] < 30 else "black"))
 _style(ax)
 
 # (B) Per-pixel gradient ratio (theoretical)

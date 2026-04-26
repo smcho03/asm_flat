@@ -95,12 +95,11 @@ def random_height(seed, A_m, sigma_smooth_um):
     return torch.tensor(smooth, dtype=torch.float32, device=device)
 
 
-def reconstruct(I_tgt, h_scale):
-    raw = torch.full((MEM, MEM), 0.2, device=device,
-                     dtype=torch.float32, requires_grad=True)
+def _adam_from(raw_init, I_tgt, h_scale, n_iter):
+    raw = raw_init.clone().detach().requires_grad_(True)
     opt = torch.optim.Adam([raw], lr=LR)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=N_ITER)
-    for _ in range(N_ITER):
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_iter)
+    for _ in range(n_iter):
         opt.zero_grad()
         h = (raw * raw) * h_scale
         loss = torch.mean((sensor(h) - I_tgt) ** 2)
@@ -108,7 +107,29 @@ def reconstruct(I_tgt, h_scale):
     with torch.no_grad():
         h_final = (raw * raw) * h_scale
         l = float(torch.mean((sensor(h_final) - I_tgt) ** 2))
-    return h_final, l
+    return raw.detach(), h_final, l
+
+
+def reconstruct(I_tgt, h_scale):
+    """Baseline (fixed raw=0.2 init) — kept for comparison."""
+    raw0 = torch.full((MEM, MEM), 0.2, device=device, dtype=torch.float32)
+    _, h, l = _adam_from(raw0, I_tgt, h_scale, N_ITER)
+    return h, l
+
+
+def reconstruct_dc_search(I_tgt, h_scale, raw_values=(0.3, 0.5, 0.7)):
+    """DC-aware init: run full N_ITER Adam from each candidate uniform
+    raw value, keep lowest-loss. Cheap because we need ~3 full runs.
+    Probe-then-continue does not work here — the probe drives raw into
+    a bad local minimum that the 15k continuation cannot escape."""
+    best = None
+    for v in raw_values:
+        raw0 = torch.full((MEM, MEM), float(v), device=device, dtype=torch.float32)
+        _, h, l = _adam_from(raw0, I_tgt, h_scale, N_ITER)
+        if best is None or l < best[0]:
+            best = (l, h, v)
+    l, h, v_best = best
+    return h, l, float(v_best)
 
 
 def psnr_db(a, b):
@@ -129,8 +150,8 @@ cases = [
 ]
 
 print(f"\nphase-wrap pixel limit lam/4 = {PHASE_WRAP_NM:.2f} nm")
-print(f"\n{'tag':>4}  {'A[nm]':>6}  {'sig[um]':>8}  {'seed':>4}  "
-      f"{'slope':>7}  {'pix[nm]':>8}  {'PSNR':>8}  {'RMSE[nm]':>10}  {'t[s]':>6}")
+print(f"\n{'tag':>4} {'A[nm]':>6} {'sig[um]':>7} {'pix[nm]':>8}  "
+      f"{'PSNR_base':>10} {'PSNR_dc':>10} {'RMSE_dc[nm]':>12} {'v*':>5}  {'t[s]':>6}")
 
 results = []
 keep = {}
@@ -138,27 +159,42 @@ for c in cases:
     A_m = c["A_nm"] * 1e-9
     h_scale = max(2.0 * A_m, 50e-9)
     h_true = random_height(c["seed"], A_m, c["sigma"])
-    # empirical per-pixel slope
     with torch.no_grad():
         gy = (h_true[1:, :] - h_true[:-1, :]).abs().max().item()
         gx = (h_true[:, 1:] - h_true[:, :-1]).abs().max().item()
     per_pix_nm = max(gx, gy) * 1e9
-    slope = per_pix_nm / (dx * 1e9)  # rise/run in m/m
+    slope = per_pix_nm / (dx * 1e9)
     with torch.no_grad():
         I_tgt = sensor(h_true)
+
+    # DC-aware init: raw=0.5 fixed (h0 = 0.5·A ≈ typical mean of smooth
+    # non-negative random patterns). Loss-based candidate selection
+    # turned out to be unreliable — lower intensity MSE does NOT imply
+    # lower h error for random patterns (forward-model ambiguity at
+    # d=5mm, dx=10um). See random_pattern_diagnostic/ for details.
     t0 = time.time()
-    h_rec, loss = reconstruct(I_tgt, h_scale)
-    p = psnr_db(h_rec, h_true)
-    rmse = float(torch.sqrt(torch.mean((h_rec - h_true) ** 2))) * 1e9
+    raw0 = torch.full((MEM, MEM), 0.5, device=device, dtype=torch.float32)
+    _, h_dc, loss_dc = _adam_from(raw0, I_tgt, h_scale, N_ITER)
+    v_best = 0.5
+    p_dc = psnr_db(h_dc, h_true)
+    rmse_dc = float(torch.sqrt(torch.mean((h_dc - h_true) ** 2))) * 1e9
     dt = time.time() - t0
-    print(f"{c['tag']:>4}  {c['A_nm']:>6.0f}  {c['sigma']:>8.0f}  "
-          f"{c['seed']:>4}  {slope:>7.4f}  {per_pix_nm:>8.2f}  "
-          f"{p:>8.2f}  {rmse:>10.3f}  {dt:>6.1f}")
+
+    # baseline PSNR from first-run JSON (documented local-minimum failure)
+    prior_baseline = {"r1": 11.31, "r2": 13.61, "r3": 12.74,
+                       "r4": 14.09, "r5": 9.83}
+    p_base = prior_baseline.get(c["tag"], float("nan"))
+
+    print(f"{c['tag']:>4} {c['A_nm']:>6.0f} {c['sigma']:>7.0f} {per_pix_nm:>8.2f}  "
+          f"{p_base:>10.2f} {p_dc:>10.2f} {rmse_dc:>12.3f} {v_best:>5.2f}  {dt:>6.0f}")
+
     results.append(dict(tag=c["tag"], A_nm=c["A_nm"], sigma_um=c["sigma"],
-                        seed=c["seed"], per_pix_nm=per_pix_nm,
-                        slope=slope, psnr=p, rmse_nm=rmse, loss=loss, t=dt))
+                        seed=c["seed"], per_pix_nm=per_pix_nm, slope=slope,
+                        psnr_base_prior=p_base,
+                        psnr=p_dc, rmse_nm=rmse_dc, loss=loss_dc,
+                        v_best=v_best, t=dt))
     keep[c["tag"]] = dict(h_true=h_true.cpu().numpy() * 1e9,
-                           h_rec =h_rec.cpu().numpy() * 1e9)
+                           h_rec =h_dc.cpu().numpy() * 1e9)
 
 
 # ---------------- plot ----------------
